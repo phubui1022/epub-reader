@@ -1,4 +1,4 @@
-
+```html
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -14,13 +14,13 @@
         button { width: 100%; padding: 16px; border-radius: 12px; border: none; font-weight: bold; background: #2563eb; color: white; margin-bottom: 10px; }
         .btn-nav { background: #4b5563; }
         .btn-stop { background: #dc2626; }
-        .control-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .control-row { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
     <div class="box">
         <input type="file" id="file-upload" accept=".epub">
-        <select id="toc-select" style="width:100%; padding:10px; margin:10px 0; border-radius:8px;"></select>
+        <select id="toc-select" style="width:100%; padding:10px; border-radius:8px; margin-bottom:10px;"></select>
         
         <div class="control-row">
             <span>Tốc độ:</span>
@@ -30,7 +30,7 @@
 
         <div id="viewer">Mở file EPUB...</div>
         
-        <button id="speak">🔊 ĐỌC CHƯƠNG NÀY (Giọng Google)</button>
+        <button id="speak">🔊 ĐỌC CHƯƠNG NÀY</button>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
             <button class="btn-nav" id="prev">TRƯỚC</button>
             <button class="btn-nav" id="next">SAU</button>
@@ -40,10 +40,11 @@
 
     <script>
         let book, rendition, audio = new Audio();
-        
         const speedSlider = document.getElementById('speed-slider');
+        const speedText = document.getElementById('speed-text');
+
         speedSlider.oninput = () => {
-            document.getElementById('speed-text').textContent = speedSlider.value + 'x';
+            speedText.textContent = speedSlider.value + 'x';
             audio.playbackRate = parseFloat(speedSlider.value);
         };
 
@@ -71,9 +72,9 @@
             const content = await book.spine.get(section).load();
             const text = encodeURIComponent(content.textContent.replace(/\s+/g, ' ').trim().substring(0, 200));
             
-            // Link Google TTS trực tiếp
             audio.src = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${text}`;
             audio.playbackRate = parseFloat(speedSlider.value);
+            // Lưu ý: Safari yêu cầu tương tác người dùng mới cho phép phát âm thanh
             audio.play().catch(e => alert("Hãy nhấn vào màn hình một lần để Safari cho phép phát âm thanh!"));
         });
 
@@ -85,3 +86,4 @@
 </body>
 </html>
 
+```
