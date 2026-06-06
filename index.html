@@ -49,18 +49,20 @@
     </div>
     <button id="stop">⏹ DỪNG</button>
 </div>
+<audio id="player" style="display:none"></audio>
+
 <script>
     let book, rendition;
-    let currentAudio = null;
     let isPlaying = false;
     let stopRequested = false;
-
+    const player = document.getElementById('player');
     const statusEl  = document.getElementById('status');
     const chunkEl   = document.getElementById('chunk-info');
     const speakBtn  = document.getElementById('speak');
     const progressW = document.getElementById('progress-wrap');
     const progressB = document.getElementById('progress-bar');
 
+    // ── EPUB ──────────────────────────────────────────────
     document.getElementById('file-upload').addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -92,6 +94,7 @@
     document.getElementById('next').addEventListener('click', () => { stopAll(); rendition?.next(); });
     document.getElementById('stop').addEventListener('click', stopAll);
 
+    // ── Lấy text ──────────────────────────────────────────
     async function getChapterText() {
         const loc = rendition.currentLocation();
         if (!loc?.start) return null;
@@ -103,84 +106,79 @@
         return clone.textContent.replace(/\s+/g, ' ').trim();
     }
 
-    function splitText(text, maxLen = 800) {
+    // ── Chia theo câu (~200 ký tự) ────────────────────────
+    function splitSentences(text) {
+        // Tách theo dấu câu tiếng Việt
+        const raw = text.match(/[^.!?…。！？]+[.!?…。！？]*/g) || [text];
         const chunks = [];
-        const sentences = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
         let current = '';
-        for (const s of sentences) {
-            if ((current + s).length > maxLen && current.length > 0) {
+        for (const s of raw) {
+            if ((current + s).length > 200 && current.length > 0) {
                 chunks.push(current.trim());
                 current = s;
             } else { current += s; }
         }
         if (current.trim()) chunks.push(current.trim());
-        return chunks;
+        return chunks.filter(c => c.length > 2);
     }
 
-    let audioCtx = null;
-
-    function getAudioContext() {
-        if (!audioCtx || audioCtx.state === 'closed') {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        return audioCtx;
-    }
-
+    // ── Gemini TTS → base64 → blob URL ───────────────────
     async function synthesize(text, apiKey) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
-        const body = {
-            contents: [{ parts: [{ text }] }],
-            generationConfig: {
-                responseModalities: ["AUDIO"],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+        const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text }] }],
+                    generationConfig: {
+                        responseModalities: ["AUDIO"],
+                        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+                    }
+                })
             }
-        };
-        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message || `HTTP ${res.status}`); }
+        );
+        if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || `HTTP ${res.status}`); }
         const data = await res.json();
         const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!b64) throw new Error('Không có dữ liệu audio từ API');
-        // Trả về ArrayBuffer thay vì blob URL
+        if (!b64) throw new Error('Không có audio từ API');
+        // Tạo blob URL — assign trực tiếp vào <audio> src
         const binary = atob(b64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return bytes.buffer;
+        return URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
     }
 
-    // Phát ArrayBuffer qua AudioContext — hoạt động trên iOS Safari
-    function playBuffer(arrayBuffer) {
+    // ── Phát 1 blob URL qua <audio> element có sẵn ───────
+    function playOne(blobUrl) {
         return new Promise((resolve, reject) => {
-            const ctx = getAudioContext();
-            ctx.decodeAudioData(arrayBuffer.slice(0), (decoded) => {
-                const src = ctx.createBufferSource();
-                src.buffer = decoded;
-                src.connect(ctx.destination);
-                src.onended = resolve;
-                src.start(0);
-                currentAudio = src;
-            }, reject);
+            player.src = blobUrl;
+            player.load();
+            player.onended = () => { URL.revokeObjectURL(blobUrl); resolve(); };
+            player.onerror = (e) => { URL.revokeObjectURL(blobUrl); resolve(); }; // bỏ qua lỗi, tiếp tục
+            player.play().then(() => {}).catch(reject);
         });
     }
 
-    // Pipeline: vừa phát đoạn i, vừa tổng hợp đoạn i+1 song song
-    async function runPipeline(chunks, apiKey, total) {
-        // Tổng hợp đoạn đầu tiên trước
-        let nextBuffer = await synthesize(chunks[0], apiKey);
+    // ── Pipeline: phát câu i, tổng hợp câu i+1 song song ─
+    async function runPipeline(chunks, apiKey) {
+        const total = chunks.length;
+        setStatus(`Đang chuẩn bị câu đầu...`);
 
-        for (let i = 0; i < chunks.length; i++) {
+        let nextUrl = await synthesize(chunks[0], apiKey);
+
+        for (let i = 0; i < total; i++) {
             if (stopRequested) break;
 
-            const bufferToPlay = nextBuffer;
+            const urlToPlay = nextUrl;
+            chunkEl.textContent = `Câu ${i+1}/${total}`;
+            progressB.style.width = `${((i+1)/total)*100}%`;
 
-            // Bắt đầu tổng hợp đoạn tiếp theo song song (không await)
-            let nextPromise = null;
-            if (i + 1 < chunks.length) {
-                nextPromise = synthesize(chunks[i + 1], apiKey).catch(() => null);
-            }
+            // Tổng hợp câu tiếp theo song song
+            let nextPromise = (i + 1 < total)
+                ? synthesize(chunks[i+1], apiKey).catch(() => null)
+                : null;
 
-            // Cập nhật UI
-            chunkEl.textContent = `Đoạn ${i+1}/${total}`;
-            progressB.style.width = `${((i + 1) / total) * 100}%`;
             if (i === 0) {
                 speakBtn.textContent = '⏸ ĐANG ĐỌC — BẤM ĐỂ DỪNG';
                 speakBtn.classList.remove('loading');
@@ -188,53 +186,53 @@
                 setStatus('🎙 Đang phát...');
             }
 
-            // Phát đoạn hiện tại — đồng thời đoạn sau đang được tổng hợp
-            try { await playBuffer(bufferToPlay); } catch(e) {}
+            // Phát câu hiện tại
+            await playOne(urlToPlay);
 
-            // Lấy kết quả đoạn tiếp theo (thường đã xong khi đoạn trước phát hết)
-            if (nextPromise) nextBuffer = await nextPromise;
+            // Lấy câu tiếp (thường đã sẵn sàng)
+            if (nextPromise) nextUrl = await nextPromise;
         }
     }
 
-    // Unlock iOS audio ngay khi tap
-    async function unlockAudio() {
-        const ctx = getAudioContext();
-        await ctx.resume();
-        const buf = ctx.createBuffer(1, 1, 22050);
-        const src = ctx.createBufferSource();
-        src.buffer = buf; src.connect(ctx.destination); src.start(0);
-    }
-
+    // ── Nút ĐỌC ──────────────────────────────────────────
     document.getElementById('speak').addEventListener('click', async () => {
         if (isPlaying) { stopAll(); return; }
         const apiKey = document.getElementById('api-key').value.trim();
         if (!apiKey) { setStatus('⚠️ Chưa nhập API Key'); return; }
         if (!book)   { setStatus('⚠️ Chưa mở file EPUB'); return; }
 
-        await unlockAudio();
+        // iOS: phải gọi play() trực tiếp trong event handler
+        // Gán src rỗng và play() ngay để unlock
+        player.src = '';
+        try { await player.play(); } catch(e) {}
+
         setStatus('Đang lấy nội dung...');
         const text = await getChapterText();
         if (!text || text.length < 5) { setStatus('⚠️ Không lấy được nội dung'); return; }
 
-        const chunks = splitText(text);
+        const chunks = splitSentences(text);
         isPlaying = true; stopRequested = false;
-        speakBtn.textContent = '⏳ Đang tổng hợp đoạn 1...';
+        speakBtn.textContent = '⏳ Đang chuẩn bị...';
         speakBtn.classList.add('loading');
         progressW.style.display = 'block';
         progressB.style.width = '0%';
 
         try {
-            await runPipeline(chunks, apiKey, chunks.length);
-        } catch(e) { setStatus('❌ Lỗi: ' + e.message); resetUI(); return; }
+            await runPipeline(chunks, apiKey);
+        } catch(e) {
+            setStatus('❌ Lỗi: ' + e.message);
+            resetUI(); return;
+        }
 
         if (!stopRequested) setStatus('✅ Đọc xong!');
         resetUI();
     });
 
+    // ── Helpers ───────────────────────────────────────────
     function stopAll() {
         stopRequested = true;
-        try { if (currentAudio) { currentAudio.stop(); currentAudio = null; } } catch(e) {}
-        try { if (audioCtx) { audioCtx.close(); audioCtx = null; } } catch(e) {}
+        player.pause();
+        player.src = '';
         resetUI();
     }
     function resetUI() {
@@ -247,5 +245,3 @@
     }
     function setStatus(msg) { statusEl.textContent = msg; }
 </script>
-</body>
-</html>
