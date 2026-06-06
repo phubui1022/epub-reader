@@ -117,6 +117,15 @@
         return chunks;
     }
 
+    let audioCtx = null;
+
+    function getAudioContext() {
+        if (!audioCtx || audioCtx.state === 'closed') {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        return audioCtx;
+    }
+
     async function synthesize(text, apiKey) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
         const body = {
@@ -131,34 +140,69 @@
         const data = await res.json();
         const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!b64) throw new Error('Không có dữ liệu audio từ API');
+        // Trả về ArrayBuffer thay vì blob URL
         const binary = atob(b64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const blob = new Blob([bytes], { type: 'audio/wav' });
-        return URL.createObjectURL(blob);
+        return bytes.buffer;
     }
 
-    function playQueue(urls, onProgress) {
-        return new Promise((resolve) => {
-            let i = 0;
-            function playNext() {
-                if (stopRequested || i >= urls.length) { resolve(); return; }
-                currentAudio = new Audio(urls[i]);
-                currentAudio.onended = () => { i++; onProgress(i, urls.length); playNext(); };
-                currentAudio.onerror = () => { i++; playNext(); };
-                currentAudio.play().catch(() => { i++; playNext(); });
-            }
-            playNext();
+    // Phát ArrayBuffer qua AudioContext — hoạt động trên iOS Safari
+    function playBuffer(arrayBuffer) {
+        return new Promise((resolve, reject) => {
+            const ctx = getAudioContext();
+            ctx.decodeAudioData(arrayBuffer.slice(0), (decoded) => {
+                const src = ctx.createBufferSource();
+                src.buffer = decoded;
+                src.connect(ctx.destination);
+                src.onended = resolve;
+                src.start(0);
+                currentAudio = src;
+            }, reject);
         });
     }
 
-    // Unlock iOS audio bằng cách phát 1 audio rỗng ngay khi tap
+    // Pipeline: vừa phát đoạn i, vừa tổng hợp đoạn i+1 song song
+    async function runPipeline(chunks, apiKey, total) {
+        // Tổng hợp đoạn đầu tiên trước
+        let nextBuffer = await synthesize(chunks[0], apiKey);
+
+        for (let i = 0; i < chunks.length; i++) {
+            if (stopRequested) break;
+
+            const bufferToPlay = nextBuffer;
+
+            // Bắt đầu tổng hợp đoạn tiếp theo song song (không await)
+            let nextPromise = null;
+            if (i + 1 < chunks.length) {
+                nextPromise = synthesize(chunks[i + 1], apiKey).catch(() => null);
+            }
+
+            // Cập nhật UI
+            chunkEl.textContent = `Đoạn ${i+1}/${total}`;
+            progressB.style.width = `${((i + 1) / total) * 100}%`;
+            if (i === 0) {
+                speakBtn.textContent = '⏸ ĐANG ĐỌC — BẤM ĐỂ DỪNG';
+                speakBtn.classList.remove('loading');
+                speakBtn.classList.add('speaking');
+                setStatus('🎙 Đang phát...');
+            }
+
+            // Phát đoạn hiện tại — đồng thời đoạn sau đang được tổng hợp
+            try { await playBuffer(bufferToPlay); } catch(e) {}
+
+            // Lấy kết quả đoạn tiếp theo (thường đã xong khi đoạn trước phát hết)
+            if (nextPromise) nextBuffer = await nextPromise;
+        }
+    }
+
+    // Unlock iOS audio ngay khi tap
     async function unlockAudio() {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = getAudioContext();
+        await ctx.resume();
         const buf = ctx.createBuffer(1, 1, 22050);
         const src = ctx.createBufferSource();
         src.buffer = buf; src.connect(ctx.destination); src.start(0);
-        await ctx.resume();
     }
 
     document.getElementById('speak').addEventListener('click', async () => {
@@ -167,48 +211,30 @@
         if (!apiKey) { setStatus('⚠️ Chưa nhập API Key'); return; }
         if (!book)   { setStatus('⚠️ Chưa mở file EPUB'); return; }
 
-        await unlockAudio(); // unlock iOS audio ngay tại thời điểm tap
+        await unlockAudio();
         setStatus('Đang lấy nội dung...');
         const text = await getChapterText();
         if (!text || text.length < 5) { setStatus('⚠️ Không lấy được nội dung'); return; }
 
         const chunks = splitText(text);
         isPlaying = true; stopRequested = false;
-        speakBtn.textContent = '⏹ ĐANG TẠO AUDIO...';
+        speakBtn.textContent = '⏳ Đang tổng hợp đoạn 1...';
         speakBtn.classList.add('loading');
         progressW.style.display = 'block';
         progressB.style.width = '0%';
 
-        const urls = [];
-        for (let i = 0; i < chunks.length; i++) {
-            if (stopRequested) break;
-            chunkEl.textContent = `Đang tổng hợp đoạn ${i+1}/${chunks.length}...`;
-            progressB.style.width = `${(i / chunks.length) * 50}%`;
-            try {
-                const url = await synthesize(chunks[i], apiKey);
-                urls.push(url);
-            } catch(e) { setStatus('❌ Lỗi API: ' + e.message); resetUI(); return; }
-        }
+        try {
+            await runPipeline(chunks, apiKey, chunks.length);
+        } catch(e) { setStatus('❌ Lỗi: ' + e.message); resetUI(); return; }
 
-        if (stopRequested || urls.length === 0) { resetUI(); return; }
-
-        speakBtn.textContent = '⏸ ĐANG ĐỌC — BẤM ĐỂ DỪNG';
-        speakBtn.classList.remove('loading'); speakBtn.classList.add('speaking');
-        setStatus('🎙 Đang phát...');
-
-        await playQueue(urls, (done, total) => {
-            chunkEl.textContent = `Đoạn ${done}/${total}`;
-            progressB.style.width = `${50 + (done / total) * 50}%`;
-        });
-
-        urls.forEach(u => URL.revokeObjectURL(u));
         if (!stopRequested) setStatus('✅ Đọc xong!');
         resetUI();
     });
 
     function stopAll() {
         stopRequested = true;
-        if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        try { if (currentAudio) { currentAudio.stop(); currentAudio = null; } } catch(e) {}
+        try { if (audioCtx) { audioCtx.close(); audioCtx = null; } } catch(e) {}
         resetUI();
     }
     function resetUI() {
