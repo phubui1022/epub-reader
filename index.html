@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sách Nói Google</title>
+    <title>Trình đọc sách EPUB - Giọng Google</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
     <style>
@@ -24,12 +24,8 @@
         
         <div class="control-row">
             <span>Tốc độ:</span>
-            <select id="speed-val" style="flex:1; padding:10px; border-radius:8px;">
-                <option value="1.0">1.0x</option>
-                <option value="1.2">1.2x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2.0">2.0x</option>
-            </select>
+            <input type="range" id="speed-slider" min="1" max="2" step="0.1" value="1" style="flex:1">
+            <span id="speed-text">1.0x</span>
         </div>
 
         <div id="viewer">Mở file EPUB...</div>
@@ -44,7 +40,8 @@
 
     <script>
         let book, rendition, audio = new Audio();
-        
+        let currentSectionHref = ""; // Biến theo dõi chương hiện tại
+
         document.getElementById('file-upload').addEventListener('change', async (e) => {
             const file = e.target.files[0];
             const reader = new FileReader();
@@ -52,6 +49,12 @@
                 book = ePub(ev.target.result);
                 rendition = book.renderTo("viewer", { width: "100%", height: "100%" });
                 await rendition.display();
+                
+                // Lắng nghe sự kiện di chuyển trang để cập nhật href hiện tại
+                rendition.on('relocated', (location) => {
+                    currentSectionHref = location.start.href;
+                });
+
                 const nav = await book.loaded.navigation;
                 const select = document.getElementById('toc-select');
                 nav.toc.forEach(ch => {
@@ -65,25 +68,33 @@
 
         document.getElementById('speak').addEventListener('click', async () => {
             audio.pause();
-            const section = rendition.currentLocation().start.href;
-            const content = await book.spine.get(section).load();
+            
+            // Lấy href từ biến theo dõi, nếu chưa có thì lấy từ location gốc
+            const href = currentSectionHref || rendition.location.start.href;
+            
+            const content = await book.spine.get(href).load();
             const text = encodeURIComponent(content.textContent.replace(/\s+/g, ' ').trim().substring(0, 200));
-            const speed = document.getElementById('speed-val').value;
             
-            // Dùng đường dẫn Google TTS chuẩn. 
-            // Lưu ý: Chúng ta không dùng audio.playbackRate nữa vì nó gây lỗi trên iOS.
-            audio.src = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${text}&speed=${speed}`;
+            // Google TTS URL
+            audio.src = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${text}`;
+            audio.playbackRate = parseFloat(document.getElementById('speed-slider').value);
             
-            // Apple ép buộc phải có tương tác chạm mới cho phép phát
-            audio.play().catch(e => {
-                alert("Hãy chạm tay vào màn hình để bắt đầu phát!");
-            });
+            // Xử lý bắt buộc chạm tay của iOS
+            audio.play().catch(e => alert("Hãy chạm vào màn hình để bắt đầu phát!"));
         });
 
         document.getElementById('stop').addEventListener('click', () => audio.pause());
         document.getElementById('prev').addEventListener('click', () => rendition.prev());
         document.getElementById('next').addEventListener('click', () => rendition.next());
-        document.getElementById('toc-select').onchange = (e) => rendition.display(e.target.value);
+        document.getElementById('toc-select').onchange = (e) => {
+            currentSectionHref = e.target.value; // Cập nhật khi chọn từ menu
+            rendition.display(e.target.value);
+        };
+        
+        document.getElementById('speed-slider').oninput = (e) => {
+            document.getElementById('speed-text').textContent = e.target.value + 'x';
+            audio.playbackRate = parseFloat(e.target.value);
+        };
     </script>
 </body>
 </html>
