@@ -152,12 +152,22 @@
         });
     }
 
+    // Unlock iOS audio bằng cách phát 1 audio rỗng ngay khi tap
+    async function unlockAudio() {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf; src.connect(ctx.destination); src.start(0);
+        await ctx.resume();
+    }
+
     document.getElementById('speak').addEventListener('click', async () => {
         if (isPlaying) { stopAll(); return; }
         const apiKey = document.getElementById('api-key').value.trim();
         if (!apiKey) { setStatus('⚠️ Chưa nhập API Key'); return; }
         if (!book)   { setStatus('⚠️ Chưa mở file EPUB'); return; }
 
+        await unlockAudio(); // unlock iOS audio ngay tại thời điểm tap
         setStatus('Đang lấy nội dung...');
         const text = await getChapterText();
         if (!text || text.length < 5) { setStatus('⚠️ Không lấy được nội dung'); return; }
