@@ -38,6 +38,26 @@
     </div>
     <input type="file" id="file-upload" accept=".epub">
     <select id="toc-select"><option value="">-- Chọn chương --</option></select>
+    <div style="display:flex;gap:8px">
+        <select id="voice-select" style="flex:1;padding:10px 12px;border-radius:10px;background:#1f1f1f;border:1px solid #374151;color:#fff;font-size:13px">
+            <option value="Aoede">🌸 Aoede — Nhẹ nhàng</option>
+            <option value="Leda">✨ Leda — Trẻ trung</option>
+            <option value="Kore">💎 Kore — Dứt khoát</option>
+            <option value="Puck">⚡ Puck — Sôi nổi</option>
+            <option value="Charon">📖 Charon — Rõ ràng</option>
+            <option value="Fenrir">🔥 Fenrir — Mạnh mẽ</option>
+            <option value="Zephyr">☀️ Zephyr — Tươi sáng</option>
+            <option value="Umbriel">🌙 Umbriel — Thư thái</option>
+        </select>
+        <select id="speed-select" style="width:110px;padding:10px 8px;border-radius:10px;background:#1f1f1f;border:1px solid #374151;color:#fff;font-size:13px">
+            <option value="0.75">🐢 0.75x</option>
+            <option value="1.0" selected>▶️ 1.0x</option>
+            <option value="1.25">🐇 1.25x</option>
+            <option value="1.5">⚡ 1.5x</option>
+            <option value="1.75">🚀 1.75x</option>
+            <option value="2.0">💨 2.0x</option>
+        </select>
+    </div>
     <div id="viewer">Mở file EPUB để bắt đầu...</div>
     <div id="progress-wrap"><div id="progress-bar"></div></div>
     <div id="status"></div>
@@ -141,7 +161,7 @@
         return buffer;
     }
 
-    async function synthesize(text, apiKey) {
+    async function synthesize(text, apiKey, voiceName = "Aoede") {
         const res = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
             {
@@ -151,7 +171,7 @@
                     contents: [{ parts: [{ text }] }],
                     generationConfig: {
                         responseModalities: ["AUDIO"],
-                        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+                        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } }
                     }
                 })
             }
@@ -172,12 +192,13 @@
     }
 
     // ── Phát 1 blob URL qua <audio> element có sẵn ───────
-    function playOne(blobUrl) {
+    function playOne(blobUrl, speed = 1.0) {
         return new Promise((resolve, reject) => {
             player.src = blobUrl;
+            player.playbackRate = speed;
             player.load();
             player.onended = () => { URL.revokeObjectURL(blobUrl); resolve(); };
-            player.onerror = (e) => { URL.revokeObjectURL(blobUrl); resolve(); }; // bỏ qua lỗi, tiếp tục
+            player.onerror = () => { URL.revokeObjectURL(blobUrl); resolve(); };
             player.play().then(() => {}).catch(reject);
         });
     }
@@ -187,7 +208,9 @@
         const total = chunks.length;
         setStatus(`Đang chuẩn bị câu đầu...`);
 
-        let nextUrl = await synthesize(chunks[0], apiKey);
+        const voiceName = document.getElementById('voice-select').value;
+        const speed = parseFloat(document.getElementById('speed-select').value);
+        let nextUrl = await synthesize(chunks[0], apiKey, voiceName);
 
         for (let i = 0; i < total; i++) {
             if (stopRequested) break;
@@ -209,7 +232,7 @@
             }
 
             // Phát câu hiện tại
-            await playOne(urlToPlay);
+            await playOne(urlToPlay, speed);
 
             // Lấy câu tiếp (thường đã sẵn sàng)
             if (nextPromise) nextUrl = await nextPromise;
